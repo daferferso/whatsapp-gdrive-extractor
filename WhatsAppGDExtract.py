@@ -10,10 +10,7 @@ usage: python3 {} help|info|list|sync
 """
 
 from base64 import b64decode
-from getpass import getpass
 from multiprocessing.pool import ThreadPool
-from textwrap import dedent
-import configparser
 import gpsoauth
 import hashlib
 import json
@@ -22,12 +19,21 @@ import requests
 import sys
 import traceback
 
+CONFIG_FILE = "settings.json"
+CONFIG_TEMPLATE = {
+    "gmail": "alias@gmail.com",
+    "password": "",
+    "android_id": "0000000000000000",
+}
+
+
 def human_size(size):
     for s in ["B", "kiB", "MiB", "GiB", "TiB", "PiB", "EiB", "ZiB", "YiB"]:
         if abs(size) < 1024:
             break
         size = int(size / 1024)
     return "{}{}".format(size, s)
+
 
 def have_file(file, size, md5):
     """
@@ -154,36 +160,28 @@ class WaBackup:
 
 
 def getConfigs():
-    config = configparser.ConfigParser()
     try:
-        config.read("settings.cfg")
-        gmail = config.get("auth", "gmail")
-        password = config.get("auth", "password", fallback="")
-        if not password:
-            try:
-                password = getpass("Enter your password for {}: ".format(gmail))
-            except KeyboardInterrupt:
-                quit("\nCancelled!")
-        android_id = config.get("auth", "android_id")
-        return {
-            "android_id": android_id,
-            "gmail": gmail,
-            "password": password,
-        }
-    except (configparser.NoSectionError, configparser.NoOptionError):
-        quit("The 'settings.cfg' file is missing or corrupt!")
+        with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+            config = json.load(f)
+
+        for key in CONFIG_TEMPLATE:
+            if key not in config:
+                raise KeyError(f"Missing key '{key}' in config file.")
+        return config
+    except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
+        print(f"Error loading configuration: {e}")
+        createSettingsFile()
+        return CONFIG_TEMPLATE
+
 
 def createSettingsFile():
-    with open("settings.cfg", "w") as cfg:
-        cfg.write(dedent("""
-            [auth]
-            gmail = alias@gmail.com
-            # Optional. The account password or app password when using 2FA.
-            # You will be prompted if omitted.
-            password = yourpassword
-            # The result of "adb shell settings get secure android_id".
-            android_id = 0000000000000000
-            """).lstrip())
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(CONFIG_TEMPLATE, f, indent=4)
+    print(
+        f"A new template file '{CONFIG_FILE}' has been created. Please fill in your details. "
+        f"Make sure to include all the necessary keys: {list(CONFIG_TEMPLATE.keys())}."
+    )
+
 
 def backup_info(backup):
     metadata = json.loads(backup["metadata"])
