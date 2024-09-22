@@ -1,23 +1,15 @@
 #!/usr/bin/env python3
 
-"""
-usage: python3 {} help|info|list|sync
-
-    help    Show this help.
-    info    Show WhatsApp backups.
-    list    Show WhatsApp backup files.
-    sync    Download all WhatsApp backups.
-"""
-
 from base64 import b64decode
 from multiprocessing.pool import ThreadPool
+import click
 import gpsoauth
 import hashlib
 import json
 import os
 import requests
-import sys
 import traceback
+
 
 CONFIG_FILE = "settings.json"
 CONFIG_TEMPLATE = {
@@ -198,61 +190,104 @@ def backup_info(backup):
     print("  Photos            : {}".format(metadata["numOfPhotos"]))
     print("  Videos            : included={} ({})".format(metadata["includeVideosInBackup"], metadata["videoSize"]))
 
-def main(args):
-    if len(args) != 2 or args[1] not in ("info", "list", "sync"):
-        quit(__doc__.format(args[0]))
 
-    if not os.path.isfile("settings.cfg"):
-        createSettingsFile()
+def load_backups():
     wa_backup = WaBackup(**getConfigs())
     backups = wa_backup.backups()
+    return wa_backup, backups
 
-    if args[1] == "info":
-        for backup in backups:
-            answer = input("\nDo you want {}? [y/n] : ".format(backup["name"].split("/")[-1]))
-            if not answer or answer[0].lower() != 'y':
-                continue
-            backup_info(backup)
 
-    elif args[1] == "list":
-        for backup in backups:
-            answer = input("\nDo you want {}? [y/n] : ".format(backup["name"].split("/")[-1]))
-            if not answer or answer[0].lower() != 'y':
-                continue
-            num_files = 0
-            total_size = 0
-            for file in wa_backup.backup_files(backup):
-                try:
-                    num_files += 1
-                    total_size += int(file["sizeBytes"])
-                    print(os.path.sep.join(file["name"].split("/")[3:]))
-                except:
-                    print("\n#####\n\nWarning: Unexpected error in file: {}\n\nDetail: {}\n\nException: {}\n\n#####\n".format(
+@click.command()
+def info():
+    """
+    Provide info about your WhatsApp backups in Google Drive
+    """
+    _, backups = load_backups()
+    for backup in backups:
+        answer = input(
+            "\nDo you want {}? [y/n] : ".format(backup["name"].split("/")[-1])
+        )
+        if not answer or answer[0].lower() != "y":
+            continue
+        backup_info(backup)
+
+
+@click.command('list')
+def list_all():
+    """
+    Provide info about your WhatsApp Files in Google Drive
+    """
+    wa_backup, backups = load_backups()
+    for backup in backups:
+        answer = input(
+            "\nDo you want {}? [y/n] : ".format(backup["name"].split("/")[-1])
+        )
+        if not answer or answer[0].lower() != "y":
+            continue
+        num_files = 0
+        total_size = 0
+        for file in wa_backup.backup_files(backup):
+            try:
+                num_files += 1
+                total_size += int(file["sizeBytes"])
+                print(os.path.sep.join(file["name"].split("/")[3:]))
+            except:
+                print(
+                    "\n#####\n\nWarning: Unexpected error in file: {}\n\nDetail: {}\n\nException: {}\n\n#####\n".format(
                         os.path.sep.join(file["name"].split("/")[3:]),
                         json.dumps(file, indent=4, sort_keys=True),
-                        traceback.format_exc()
-                    ))
-                    input("Press the <Enter> key to continue...")
-                    continue
-            print("{} files ({})".format(num_files, human_size(total_size)))
+                        traceback.format_exc(),
+                    )
+                )
+                input("Press the <Enter> key to continue...")
+                continue
+        print("{} files ({})".format(num_files, human_size(total_size)))
 
-    elif args[1] == "sync":
-        with open("md5sum.txt", "w", encoding="utf-8", buffering=1) as cksums:
-            for backup in backups:
-                try:
-                    answer = input("\nDo you want {}? [y/n] : ".format(backup["name"].split("/")[-1]))
-                    if not answer or answer[0].lower() != 'y':
-                        continue
-                    print("Backup Size:{} Upload Time: {}".format(human_size(int(backup["sizeBytes"])), backup["updateTime"]))
-                    wa_backup.fetch_all(backup, cksums)
-                except Exception as err:
-                    print("\n#####\n\nWarning: Unexpected error in backup: {} (Size:{} Upload Time: {})\n\nException: {}\n\n#####\n".format(
+
+@click.command()
+def sync():
+    """
+    Download all WhatsApp backups
+    """
+    wa_backup, backups = load_backups()
+    with open("md5sum.txt", "w", encoding="utf-8", buffering=1) as cksums:
+        for backup in backups:
+            try:
+                answer = input(
+                    "\nDo you want {}? [y/n] : ".format(backup["name"].split("/")[-1])
+                )
+                if not answer or answer[0].lower() != "y":
+                    continue
+                print(
+                    "Backup Size:{} Upload Time: {}".format(
+                        human_size(int(backup["sizeBytes"])), backup["updateTime"]
+                    )
+                )
+                wa_backup.fetch_all(backup, cksums)
+            except Exception as err:
+                print(
+                    "\n#####\n\nWarning: Unexpected error in backup: {} (Size:{} Upload Time: {})\n\nException: {}\n\n#####\n".format(
                         backup["name"].split("/")[-1],
                         human_size(int(backup["sizeBytes"])),
                         backup["updateTime"],
-                        traceback.format_exc()
-                    ))
-                    input("Press the <Enter> key to continue...")
+                        traceback.format_exc(),
+                    )
+                )
+                input("Press the <Enter> key to continue...")
+
+
+@click.group()
+def cli():
+    """
+    WhatsApp GDrive Extractor.
+    A tool that allows you to get information or download your WhatsApp backups from Google Drive.
+    """
+    pass
+
+
+cli.add_command(info)
+cli.add_command(list_all)
+cli.add_command(sync)
 
 if __name__ == "__main__":
-    main(sys.argv)
+    cli()
