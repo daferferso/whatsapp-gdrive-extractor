@@ -346,7 +346,7 @@ args = None
 def get_user_confirmation(backup_name):
     """
     Prompt the user for confirmation to proceed with a specific backup.
-    If global args.force is set, automatically returns True.
+    If running in CLI mode (any action flag is set), automatically returns True.
 
     Args:
         backup_name (str): The name of the backup to confirm.
@@ -354,7 +354,8 @@ def get_user_confirmation(backup_name):
     Returns:
         bool: True if the user confirms ('y'), False otherwise ('n').
     """
-    if args and args.force:
+    # If any action flag is set, assume headless/batch mode and auto-confirm
+    if args and (args.info or args.list or args.sync or args.decrypt):
         return True
 
     while True:
@@ -502,7 +503,6 @@ if __name__ == "__main__":
     parser.add_argument("--list", action="store_true", help="List files in WhatsApp backups")
     parser.add_argument("--sync", action="store_true", help="Download WhatsApp backups")
     parser.add_argument("--decrypt", action="store_true", help="Decrypt downloaded backups")
-    parser.add_argument("--force", "--yes", action="store_true", help="Answer 'yes' to all confirmation prompts")
     parser.add_argument("--key-file", type=str, help="Path to the encryption key file for decryption")
     
     args = parser.parse_args()
