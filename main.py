@@ -3,12 +3,24 @@
 from base64 import b64decode
 from multiprocessing.pool import ThreadPool
 from tqdm import tqdm
+import decrypter
 import gpsoauth
 import hashlib
 import json
 import os
 import requests
+from requests.exceptions import SSLError, ChunkedEncodingError
+import time
+import urllib3
 
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# Monkey-patch requests to disable SSL verification
+old_request = requests.Session.request
+def new_request(self, method, url, *args, **kwargs):
+    kwargs['verify'] = False
+    return old_request(self, method, url, *args, **kwargs)
+requests.Session.request = new_request
 
 CONFIG_FILE = "settings.json"
 CONFIG_TEMPLATE = {
@@ -241,11 +253,41 @@ class WaBackup:
         """
         name = os.path.sep.join(file["name"].split("/")[3:])
         md5Hash = b64decode(file["md5Hash"], validate=True)
+        
+        # Metadata downloading for mcrypt1 files
+        if name.endswith(".mcrypt1"):
+            metadata_path = name + "-metadata"
+            if not os.path.exists(metadata_path):
+                try:
+                    # Request without alt=media to get the metadata
+                    response = self.get(file["name"].replace("%", "%25").replace("+", "%2B"))
+                    if response.status_code == 200:
+                        metadata_content = response.json().get("metadata")
+                        if metadata_content:
+                            os.makedirs(os.path.dirname(metadata_path), exist_ok=True)
+                            with open(metadata_path, "w") as meta_f:
+                                meta_f.write(metadata_content)
+                            # print(f"Downloaded metadata for {name}")
+                except Exception as e:
+                    print(f"Failed to download metadata for {name}: {e}")
+
         if not have_file(name, int(file["sizeBytes"]), md5Hash):
-            download_file(
-                name,
-                self.get(file["name"].replace("%", "%25").replace("+", "%2B"), {"alt": "media"}, stream=True)
-            )
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    download_file(
+                        name,
+                        self.get(file["name"].replace("%", "%25").replace("+", "%2B"), {"alt": "media"}, stream=True)
+                    )
+                    break # Success
+                except (SSLError, ChunkedEncodingError, requests.exceptions.ConnectionError) as e:
+                    print(f"Error downloading {name}: {e}. Retrying {attempt + 1}/{max_retries}...")
+                    time.sleep(1 * (attempt + 1)) # Backoff
+            else:
+                print(f"Failed to download {name} after {max_retries} attempts.")
+                # We might want to raise here or just log it. 
+                # Raising ensures the process stops if a file is truly un-downloadable.
+                raise Exception(f"Failed to download {name}")
 
         return name, int(file["sizeBytes"]), md5Hash
 
@@ -284,15 +326,15 @@ def backup_info(backup):
     """
     metadata = json.loads(backup["metadata"])
     for size in ["backupSize", "chatdbSize", "mediaSize", "videoSize"]:
-        metadata[size] = human_size(int(metadata[size]))
+        metadata[size] = human_size(int(metadata.get(size, 0)))
     
-    print(f"Backup {backup['name'].split('/')[-1]} Size:({metadata['backupSize']}) Upload Time: {backup['updateTime']}")
-    print(f"  WhatsApp version  : {metadata['versionOfAppWhenBackup']}")
+    print(f"Backup {backup['name'].split('/')[-1]} Size:({metadata.get('backupSize', 'N/A')}) Upload Time: {backup['updateTime']}")
+    print(f"  WhatsApp version  : {metadata.get('versionOfAppWhenBackup', 'N/A')}")
     print(f"  Password protected: {metadata.get('passwordProtectedBackupEnabled', 'N/A')}")
-    print(f"  Messages          : {metadata['numOfMessages']} ({metadata['chatdbSize']})")
-    print(f"  Media files       : {metadata['numOfMediaFiles']} ({metadata['mediaSize']})")
-    print(f"  Photos            : {metadata['numOfPhotos']}")
-    print(f"  Videos            : included={metadata['includeVideosInBackup']} ({metadata['videoSize']})")
+    print(f"  Messages          : {metadata.get('numOfMessages', 'N/A')} ({metadata.get('chatdbSize', 'N/A')})")
+    print(f"  Media files       : {metadata.get('numOfMediaFiles', 'N/A')} ({metadata.get('mediaSize', 'N/A')})")
+    print(f"  Photos            : {metadata.get('numOfPhotos', 'N/A')}")
+    print(f"  Videos            : included={metadata.get('includeVideosInBackup', 'N/A')} ({metadata.get('videoSize', 'N/A')})")
 
 
 def get_user_confirmation(backup_name):
@@ -374,6 +416,41 @@ def sync():
                 print(f"Backup Size: {human_size(int(backup['sizeBytes']))} Upload Time: {backup['updateTime']}")
                 wa_backup.fetch_all(backup, cksums)
 
+def decrypt_backups():
+    """
+    Decrypt downloaded WhatsApp backups.
+    """
+    _, backups = load_backups()
+    
+    # Default key file location
+    key_file = "encrypted_backup.key"
+    if not os.path.exists(key_file):
+        # Check in backup_data just in case
+        if os.path.exists(os.path.join("backup_data", "encrypted_backup.key")):
+            key_file = os.path.join("backup_data", "encrypted_backup.key")
+        else:
+            key_file = input(f"Path to encrypted_backup.key (default: {key_file}): ").strip() or key_file
+    
+    if not os.path.exists(key_file):
+        print(f"Key file '{key_file}' not found. Aborting decryption.")
+        return
+
+    output_base = "decrypted_output"
+
+    for backup in backups:
+        backup_id = backup['name'].split("/")[-1]
+        if get_user_confirmation(f"{backup_id} (Decrypt)"):
+            # The download structure is {backup_id}/files/...
+            local_backup_dir = backup_id 
+            
+            if not os.path.exists(local_backup_dir):
+                print(f"Backup directory {local_backup_dir} not found. Did you sync first?")
+                continue
+            
+            output_dir = os.path.join(output_base, backup_id)
+            print(f"Decrypting {local_backup_dir} to {output_dir}...")
+            decrypter.process_backup(local_backup_dir, output_dir, key_file)
+
 def menu():
     """
     Display a menu for the user to choose options for managing WhatsApp backups.
@@ -385,7 +462,8 @@ def menu():
         '1': info,
         '2': list_all,
         '3': sync,
-        '4': exit,
+        '4': decrypt_backups,
+        '5': exit,
     }
 
     while True:
@@ -393,7 +471,8 @@ def menu():
         print("1. Info - Provide info about your WhatsApp backups in Google Drive")
         print("2. List - Provide info about your WhatsApp Files in Google Drive")
         print("3. Sync - Download all WhatsApp backups")
-        print("4. Exit")
+        print("4. Decrypt - Decrypt downloaded backups")
+        print("5. Exit")
 
         choice = input("Please enter your choice: ")
         if choice in options:
