@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
 
+import argparse
+import sys
 from base64 import b64decode
 from multiprocessing.pool import ThreadPool
 from tqdm import tqdm
@@ -337,9 +339,14 @@ def backup_info(backup):
     print(f"  Videos            : included={metadata.get('includeVideosInBackup', 'N/A')} ({metadata.get('videoSize', 'N/A')})")
 
 
+
+# Global args to hold parsed arguments
+args = None
+
 def get_user_confirmation(backup_name):
     """
     Prompt the user for confirmation to proceed with a specific backup.
+    If global args.force is set, automatically returns True.
 
     Args:
         backup_name (str): The name of the backup to confirm.
@@ -347,6 +354,9 @@ def get_user_confirmation(backup_name):
     Returns:
         bool: True if the user confirms ('y'), False otherwise ('n').
     """
+    if args and args.force:
+        return True
+
     while True:
         response = input(f"\nDo you want {backup_name}? [y/n]: ").strip().lower()
         if response in ['y', 'n']:
@@ -424,11 +434,16 @@ def decrypt_backups():
     
     # Default key file location
     key_file = "encrypted_backup.key"
+    
+    # Check CLI args first
+    if args and args.key_file:
+        key_file = args.key_file
+    
     if not os.path.exists(key_file):
         # Check in backup_data just in case
         if os.path.exists(os.path.join("backup_data", "encrypted_backup.key")):
             key_file = os.path.join("backup_data", "encrypted_backup.key")
-        else:
+        elif not (args and args.key_file): # Only prompt if not provided via CLI
             key_file = input(f"Path to encrypted_backup.key (default: {key_file}): ").strip() or key_file
     
     if not os.path.exists(key_file):
@@ -482,4 +497,25 @@ def menu():
 
 
 if __name__ == "__main__":
-    menu()
+    parser = argparse.ArgumentParser(description="WhatsApp Google Drive Extractor")
+    parser.add_argument("--info", action="store_true", help="Show information about WhatsApp backups")
+    parser.add_argument("--list", action="store_true", help="List files in WhatsApp backups")
+    parser.add_argument("--sync", action="store_true", help="Download WhatsApp backups")
+    parser.add_argument("--decrypt", action="store_true", help="Decrypt downloaded backups")
+    parser.add_argument("--force", "--yes", action="store_true", help="Answer 'yes' to all confirmation prompts")
+    parser.add_argument("--key-file", type=str, help="Path to the encryption key file for decryption")
+    
+    args = parser.parse_args()
+    
+    # If any action argument is provided, execute it. Otherwise show menu.
+    if args.info or args.list or args.sync or args.decrypt:
+        if args.info:
+            info()
+        if args.list:
+            list_all()
+        if args.sync:
+            sync()
+        if args.decrypt:
+            decrypt_backups()
+    else:
+        menu()
