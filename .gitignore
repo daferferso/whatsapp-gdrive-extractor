@@ -160,5 +160,10 @@ cython_debug/
 #.idea/
 
 # Whatsapp extractor
-*/*
+
 md5sum.txt
+!decrypted_output/
+!decrypted_output/*
+
+.gemini/
+gha-creds-*.json
