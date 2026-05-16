@@ -8,6 +8,9 @@ import hashlib
 import json
 import os
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 
 
 CONFIG_FILE = "settings.json"
@@ -15,7 +18,8 @@ CONFIG_TEMPLATE = {
     "gmail": "alias@gmail.com",
     "password": "",
     "android_id": "0000000000000000",
-    "oauth_token": "oauth2_4/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+    "oauth_token": "oauth2_4/XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX",
+    "download_path": os.path.join(os.path.expanduser("~"), "Downloads", "WhatsApp Backups")
 }
 
 
@@ -39,6 +43,8 @@ def get_configs():
             raise KeyError(f"Missing key 'android_id' in config file.")
         if 'password' not in config and 'oauth_token' not in config:
             raise KeyError(f"Missing key: either 'password' or 'oauth_token' must be provided in config file.")
+        if 'download_path' not in config:
+            config['download_path'] = os.path.join(os.path.expanduser("~"), "Downloads", "WhatsApp Backups")
         return config
     except (FileNotFoundError, json.JSONDecodeError, KeyError) as e:
         print(f"Error loading configuration: {e}")
@@ -113,7 +119,7 @@ def download_file(file, stream):
 class WaBackup:
     """Class to access WhatsApp backups stored in Google Drive."""
 
-    def __init__(self, android_id, gmail, password=None, oauth_token=None):
+    def __init__(self, android_id, gmail, password=None, oauth_token=None, download_path=None):
         """
         Initialize the WaBackup instance.
 
@@ -121,10 +127,12 @@ class WaBackup:
             gmail (str): The user's Gmail address.
             password (str): The user's Gmail password.
             android_id (str): The user's Android ID.
+            download_path (str): The path to save downloaded files.
 
         Raises:
             SystemExit: If login fails.
         """
+        self.download_path = download_path or os.path.join(os.path.expanduser("~"), "Downloads", "WhatsApp Backups")
         if oauth_token is not None:
             token = gpsoauth.exchange_token(gmail, oauth_token, android_id)
             print("oauth")
@@ -141,6 +149,16 @@ class WaBackup:
             "com.whatsapp",
             "38a0f7d505fe18fec64fbf343ecaaaf310dbd799",
         )
+        self.session = requests.Session()
+        retry_strategy = Retry(
+            total=5,
+            backoff_factor=1,
+            status_forcelist=[429, 500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
+
 
     def get(self, path, params=None, **kwargs):
         """
@@ -155,22 +173,18 @@ class WaBackup:
             requests.Response: The response object from the GET request.
         """
         try:
-            response = requests.get(
+            response = self.session.get(
                 f"https://backup.googleapis.com/v1/{path}",
                 headers={"Authorization": f"Bearer {self.auth['Auth']}"},
                 params=params,
                 **kwargs,
             )
             response.raise_for_status()
-        except requests.exceptions.HTTPError as errh:
-            print ("\n\nHttp Error:",errh)
-        except requests.exceptions.ConnectionError as errc:
-            print ("\n\nError Connecting:",errc)
-        except requests.exceptions.Timeout as errt:
-            print ("\n\nTimeout Error:",errt)
+            return response
         except requests.exceptions.RequestException as err:
-            print ("\n\nOOps: Something Else",err)
-        return response
+            print(f"\n\nRequest Error: {err}")
+            raise
+
 
     def get_page(self, path, page_token=None):
         """
@@ -237,17 +251,25 @@ class WaBackup:
             file (dict): The file item to fetch.
 
         Returns:
-            tuple: A tuple containing the file name, size, and MD5 hash.
+            tuple: A tuple containing the file name, size, and MD5 hash, or None on failure.
         """
-        name = os.path.sep.join(file["name"].split("/")[3:])
-        md5Hash = b64decode(file["md5Hash"], validate=True)
-        if not have_file(name, int(file["sizeBytes"]), md5Hash):
-            download_file(
-                name,
-                self.get(file["name"].replace("%", "%25").replace("+", "%2B"), {"alt": "media"}, stream=True)
-            )
+        relative_name = os.path.sep.join(file["name"].split("/")[3:])
+        name = os.path.join(self.download_path, relative_name)
+        try:
+            md5Hash = b64decode(file["md5Hash"], validate=True)
+            if not have_file(name, int(file["sizeBytes"]), md5Hash):
+                with self.get(
+                    file["name"].replace("%", "%25").replace("+", "%2B"),
+                    {"alt": "media"},
+                    stream=True,
+                ) as response:
+                    download_file(name, response)
 
-        return name, int(file["sizeBytes"]), md5Hash
+            return name, int(file["sizeBytes"]), md5Hash
+        except Exception as e:
+            print(f"\nError fetching {name}: {e}")
+            return None
+
 
     def fetch_all(self, backup, cksums):
         """
@@ -266,11 +288,15 @@ class WaBackup:
                 lambda file: self.fetch(file),
                 files
             )
-            for name, size, md5Hash in downloads:
-                num_files += 1
-                total_size += size
+            for result in downloads:
+                if result:
+                    name, size, md5Hash = result
+                    num_files += 1
+                    total_size += size
+                    relative_name = os.path.sep.join(name.replace(self.download_path, "").lstrip(os.path.sep).split(os.path.sep))
+                    cksums.write(f"{md5Hash.hex()} *{relative_name}\n")
                 pbar.update(1)
-                cksums.write(f"{md5Hash.hex()} *{name}\n")
+
 
         print(f"\n{num_files} files ({human_size(total_size)})")
 
@@ -354,7 +380,8 @@ def list_all():
                 try:
                     num_files += 1
                     total_size += int(file["sizeBytes"])
-                    print(os.path.sep.join(file["name"].split("/")[3:]))
+                    relative_name = os.path.sep.join(file["name"].split("/")[3:])
+                    print(relative_name)
                 except Exception as e:
                     print(f"\nError processing file: {e}")
             print(f"{num_files} files ({human_size(total_size)})")
@@ -368,7 +395,9 @@ def sync():
     MD5 checksums of the downloaded files to a text file named 'md5sum.txt'.
     """
     wa_backup, backups = load_backups()
-    with open("md5sum.txt", "w", encoding="utf-8", buffering=1) as cksums:
+    os.makedirs(wa_backup.download_path, exist_ok=True)
+    md5sum_path = os.path.join(wa_backup.download_path, "md5sum.txt")
+    with open(md5sum_path, "w", encoding="utf-8", buffering=1) as cksums:
         for backup in backups:
             if get_user_confirmation(backup["name"].split("/")[-1]):
                 print(f"Backup Size: {human_size(int(backup['sizeBytes']))} Upload Time: {backup['updateTime']}")

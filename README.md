@@ -25,16 +25,20 @@ Run `adb shell settings get secure android_id` or search Google Play for "device
    ```
 4. Run the Docker container:
 
-   Linux:
+   **macOS / Linux:**
    ```bash
-   cd whatsapp-gdrive-extractor/
-   docker run -v $(pwd):/app -it whatsapp-gdrive-extractor
+   # Replace <YOUR_USER> with your macOS username (e.g., andercmd)
+   docker run -v $(pwd):/app -v ~/Downloads:/Users/<YOUR_USER>/Downloads -it whatsapp-gdrive-extractor
    ```
-   Windows:
+
+   **Windows (PowerShell):**
    ```powershell
-   cd .\whatsapp-gdrive-extractor\
-   docker run -v .:/app -it whatsapp-gdrive-extractor
+   # Replace <YOUR_USER> with your Windows username
+   docker run -v ${PWD}:/app -v $HOME\Downloads:/Users/<YOUR_USER>/Downloads -it whatsapp-gdrive-extractor
    ```
+
+   > [!IMPORTANT]
+   > Ensure the `download_path` in `settings.json` matches the internal container path (e.g., `/Users/<YOUR_USER>/Downloads/WhatsApp Backups`).
 
 If downloading is interrupted, the files that were received successfully
 won't be re-downloaded when running the tool one more time. After
